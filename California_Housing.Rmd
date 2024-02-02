@@ -1,0 +1,338 @@
+---
+title: "California_Housing"
+author: "Aditya Pansari"
+date: "2024-02-02"
+output:
+  word_document: default
+  html_document: default
+---
+### California Housing
+### Let's see what are the pre-installed libraries in the system
+
+
+```{r}
+#  California Housing Prices 1990 
+
+library(gdata)
+library(plyr)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(gridExtra)
+library(caTools) # for splitting the data
+library(digest) # For hash functions
+library(ggplot2) 
+library(recipes)
+library(caret)
+library(data.table)
+library(caret)
+library(leaflet) # for map. visualization
+library(sf)
+library(viridis)
+```
+### Data Loading
+```{r}
+houses <- read.csv("housing.csv")
+```
+### Data Preprocessing / Taking  a Quick Look at the Data Structure
+```{r}
+summary(houses)
+head(houses)
+str(houses)
+colnames(houses)
+```
+### Let's look if we have missing values
+```{r}
+missing_counts <- colSums(is.na(houses)) # counting missing values for each column
+missing_counts
+```
+### Let's calculate the proportion of missing values in each column
+```{r}
+missing_proportion <- houses %>%
+  summarise_all(~ mean(is.na(.))) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "ProportionMissing")
+missing_proportion
+```
+
+```{r}
+median_total_bedrooms <- median(houses$total_bedrooms, na.rm = TRUE)
+houses$total_bedrooms[is.na(houses$total_bedrooms)] <- median_total_bedrooms
+```
+### A vizualization of the distribution of bedrooms
+```{r}
+
+total_bedrooms <- ggplot(houses, aes(x = total_bedrooms)) +
+  geom_boxplot(fill = "skyblue", color = "black") +
+  labs(title = "",
+       x = "Total Bedrooms",
+       y = "") +
+  theme_minimal()
+total_bedrooms
+
+
+total_bedrooms2 <- ggplot(houses, aes(x = total_bedrooms)) +
+  geom_histogram(fill = "skyblue", color = "black") +
+  labs(title = "",
+       x = "Total Bedrooms",
+       y = "") +
+  theme_minimal()
+total_bedrooms2
+```
+### let's vizualize each numeric column with histograms to see the distribution of its data
+```{r}
+par(mfrow=c(3, 3)) # allows us to insert several graphs in one
+
+hist(houses$longitude, main="Longitude", xlab="Value")
+hist(houses$latitude, main="Latitude", xlab="Value")
+hist(houses$housing_median_age, main="Housing Median Age", xlab="Value")
+hist(houses$total_rooms, main="Total Rooms", xlab="Value")
+hist(houses$total_bedrooms, main="Total Bedrooms", xlab="Value")
+hist(houses$population, main="Population", xlab="Value")
+hist(houses$households, main="Households", xlab="Value")
+hist(houses$median_income, main="Median Income", xlab="Value")
+hist(houses$median_house_value, main="Median House Value", xlab="Value")
+```
+
+```{r}
+numeric_columns <- c(
+  "longitude",
+  "latitude",
+  "housing_median_age",
+  "total_rooms",
+  "total_bedrooms",
+  "population",
+  "households",
+  "median_income",
+  "median_house_value"
+)
+hists <- list()
+
+for (column in numeric_columns) {
+  p <- ggplot(houses, aes(x = !!sym(column))) +
+    geom_histogram(fill = "skyblue", col="blue") +
+    labs(title = paste("Distribution of", column),
+         x = column,
+         y = "") +
+    theme_minimal() 
+  hists[[column]] <- p
+}
+
+histograms <- grid.arrange(grobs = hists, ncol = 3)
+
+```
+### Creating a test set
+```{r}
+# Let's split the dataset into training and testing sets (80% train, 20% test)
+set.seed(123)  #to make this output identical at every run
+
+#Option 1 
+training_data <- sample.split(houses$median_house_value, SplitRatio = 0.8)
+
+# Creating the training and test sets
+train_set <- houses[training_data, ]
+test_set <- houses[!training_data, ]
+
+nrow(train_set)  #number of rows for each set
+nrow(test_set)   
+
+summary(train_set)
+summary(test_set)
+```
+
+```{r}
+# Creating test set. Option 2
+# We need to define a function to check whether an instance should be in the test set, but before we need to find an identifier. 
+# Since we do not have index or ID column, I will create ID column by combining latitude and longtitude columns together to make them identifiers for test_set_check function.  
+
+
+houses$ID <- paste(houses$latitude, houses$longitude, sep = "_")
+```
+
+```{r}
+set.seed(42)
+
+# Let's use createDataPartition function to split the data based on the identifier column, 
+# it tries to ensure that each partition (train or test) has a representative sample of the unique values in the identifier column (ID)
+
+index <- createDataPartition(houses$ID, p = 0.7, list = FALSE) # Creating an index for splitting the data (70% training, 30% test)
+
+# Training and splitting the data by ID column
+train_set2 <- houses[index, ]
+test_set2 <- houses[-index, ]
+
+summary(train_set2)
+head(train_set2)
+```
+# Let's create a histogram for visualizig median income because some experts assume that this attribute is important in predicting median housing prices
+```{r}
+med_income_hist <- ggplot(houses, aes(x = median_income)) +
+  geom_histogram(fill = "skyblue", color = "black", bins = 30) +
+  labs(title = "",
+       x = "",
+       y = "") +
+  theme_minimal()
+med_income_hist
+```
+```{r}
+# Most median income values are clustered around 1 to 6 (Keep in mind that this values are capped. So 1-6 are basically $10,000–$60,000),  
+# but some median incomes go far beyond 6. It is important to have a sufficient number of instances in our dataset for each stratum, 
+# This means that we should not have too many strata, and each stratum should be large enough. 
+# We will create an income category attribute with 5 categories (labeled from 1 to 5): category 1 ranges from 0 to 1.5 
+# (i.e., less than $15,000), category 2 from 1.5 to 3, and so on:
+
+houses$income_cat <- cut(houses$median_income,
+                         breaks = c(0, 1.5, 3.0, 4.5, 6.0, Inf),
+                         labels = c(1, 2, 3, 4, 5))
+
+
+# Get value counts for the 'income_cat' column
+income_cat_counts <- table(houses$income_cat)
+income_cat_counts
+```
+### let's make another hist with income categories
+```{r}
+med_income_cat_bar <- ggplot(houses, aes(x = factor(income_cat))) +
+  geom_bar(fill = "skyblue", color = "black") +
+  labs(title = "Median income categories",
+       x = "",
+       y = "") +
+  theme_minimal()
+med_income_cat_bar
+```
+
+```{r}
+# So now we can see that the most median income is in the category 3 which ranges from 3 to 4.5 (or in other words median income between $30k to $45k. Do not forget that it is in 1990!)
+# Now we are ready to do stratified sampling based on the income category.
+
+set.seed(42)  # Set a random seed for reproducibility
+split <- createDataPartition(houses$income_cat, p = 0.2, list = FALSE)
+
+# We will create another stratified training and test sets
+strat_train_set <- houses[split, ]
+strat_test_set <- houses[-split, ]
+
+# let's check the distribution of income categories in the test set
+income_cat_prop <- prop.table(table(strat_test_set$income_cat))
+
+# I want to arrange the proportions in descending order
+income_cat_props_desc <- income_cat_prop[order(-income_cat_prop)]
+income_cat_props_desc
+```
+### Let's find proportion of income categories on the whole dataset to compare how stratified sampling is different from random sampling.
+```{r}
+income_cat_prop_full <- prop.table(table(houses$income_cat)) # the proportions of income categories in the whole dataset
+income_cat_prop_full
+
+# To compare between stratified and random sampling, we need to ensure that income_cat column exists in test_set2 too
+test_set$income_cat <- cut(test_set$median_income,
+                            breaks = c(0, 1.5, 3.0, 4.5, 6.0, Inf),
+                            labels = c(1, 2, 3, 4, 5))
+
+
+random_income_cat_prop <- prop.table(table(test_set$income_cat)) # the proportions of income categories in the random test set
+random_income_cat_prop
+
+stratified_income_cat_prop <- income_cat_props_desc # the proportions of income categories in the stratified test set
+stratified_income_cat_prop
+```
+### Let's create a data frame to compare the proportions
+```{r}
+compare_prop <- data.frame(
+  "Overall" = income_cat_prop_full,
+  "Random" = random_income_cat_prop,
+  "Stratified" = stratified_income_cat_prop
+)
+compare_prop
+```
+```{r}
+# Now after exploring sampling bias comparison of stratified versus purely random sampling we should remove the income_cat attribute so the data is back to its original state:
+
+houses <- subset(houses, select = -income_cat) # removing income_cat from houses
+
+test_set2<- subset(test_set, select = -income_cat) # removing income_cat from test_set2
+
+test_set <- subset(test_set, select = -income_cat)  # removing income_cat from test_set
+```
+
+```{r}
+copy_strat_train_set <- strat_train_set
+```
+### We will visualize geographical data
+```{r}
+
+map <- ggplot(copy_strat_train_set, aes(x = longitude, y = latitude)) +
+  geom_point(color = "skyblue", alpha = 0.4) +
+  labs(title = "A geographical scatterplot of the data",
+       x = "Longitude",
+       y = "Latitude") +
+  theme_minimal()
+map
+```
+```{r}
+library(ggplot2)
+map2 <- ggplot(copy_strat_train_set, aes(x = longitude, y = latitude)) +
+  geom_point(aes(size = population, color = median_house_value), alpha = 0.4) +
+  scale_size_continuous(range = c(1, 15)) +
+  scale_color_gradient(low = "yellow", high = "red") +
+  labs(
+    title = "California Housing Prices",
+    x = "Longitude",
+    y = "Latitude",
+    size = "Population",
+    color = "Median House Value"
+  ) +
+  theme_minimal()+
+  guides(color = guide_colorbar(title = "Median House Value"))
+
+
+map2
+```
+```{r}
+numeric_attributes <- copy_strat_train_set[, sapply(copy_strat_train_set, is.numeric)]
+```
+```{r}
+correlation_matrix <- cor(numeric_attributes)
+```
+
+```{r}
+median_house_value_corr <- correlation_matrix[,"median_house_value"]
+sorted_correlation <- sort(median_house_value_corr, decreasing = TRUE)
+```
+
+```{r}
+corr_df <- data.frame(Attribute = names(sorted_correlation), Correlation = sorted_correlation)
+corr_plot <- ggplot(corr_df, aes(x = reorder(Attribute, Correlation), y = Correlation)) +
+  geom_bar(stat = "identity", fill = "skyblue", alpha = 1.5) +
+  coord_flip() +
+  labs(
+    title = "Correlation with Median House Value",
+    x = "Attribute",
+    y = "Correlation"
+  ) +
+  theme_minimal()
+
+corr_plot
+```
+
+```{r}
+corr_plot2 <- ggplot(copy_strat_train_set, aes(x = median_income, y = median_house_value)) +
+  geom_point(color = "#fdbb84", alpha = 0.7) +
+  labs(
+    title = "Median Income vs. Median House Value",
+    x = "Median Income",
+    y = "Median House Value"
+  ) +
+  theme_minimal()
+
+corr_plot2
+```
+
+```{r}
+ggplot(houses,aes(x=houses$housing_median_age, y=houses$median_income))+
+  geom_point()
+```
+```{r}
+ggplot(houses,aes(x=houses$housing_median_age, y=houses$median_income))+
+  geom_violin()
+```
+
